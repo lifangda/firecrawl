@@ -665,3 +665,10 @@ For more details on the licensing of specific components, please refer to the LI
         ↑ Back to Top ↑
     </a>
 </p>
+
+cp docker-compose.yaml docker-compose.yaml.$(date +%s).bak
+git checkout main
+git pull origin main
+docker compose down
+tar -cvf volumes-$(date +%s).tgz volumes
+docker compose up -d
