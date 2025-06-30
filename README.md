@@ -667,11 +667,22 @@ For more details on the licensing of specific components, please refer to the LI
         ↑ Back to Top ↑
     </a>
 </p>
+
 curl -o .env.example https://raw.githubusercontent.com/mendableai/firecrawl/refs/heads/main/apps/api/.env.example
+
 curl -o docker-compose-1.13.0.yaml https://raw.githubusercontent.com/mendableai/firecrawl/refs/heads/main/docker-compose.yaml
+
 cp docker-compose.yaml docker-compose.yaml.$(date +%s).bak
+
 git checkout main
+
 git pull origin main
+git push origin main
+
 docker compose down
+
 tar -cvf volumes-$(date +%s).tgz volumes
+
 docker compose up -d
+
+https://84c93c222ae54219a39d737bf380ce19--3002.ap-shanghai.cloudstudio.club/
