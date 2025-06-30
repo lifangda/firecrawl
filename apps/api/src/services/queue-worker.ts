@@ -6,7 +6,6 @@ import {
   getScrapeQueue,
   getExtractQueue,
   getDeepResearchQueue,
-  getIndexQueue,
   redisConnection,
   getGenerateLlmsTxtQueue,
   getBillingQueue,
@@ -50,15 +49,8 @@ import { getJobs } from "..//controllers/v1/crawl-status";
 import { configDotenv } from "dotenv";
 import { scrapeOptions } from "../controllers/v1/types";
 import {
-  cleanOldConcurrencyLimitEntries,
-  cleanOldCrawlConcurrencyLimitEntries,
-  getConcurrencyLimitActiveJobs,
+  concurrentJobDone,
   pushConcurrencyLimitActiveJob,
-  pushCrawlConcurrencyLimitActiveJob,
-  removeConcurrencyLimitActiveJob,
-  removeCrawlConcurrencyLimitActiveJob,
-  takeConcurrencyLimitedJob,
-  takeCrawlConcurrencyLimitedJob,
 } from "../lib/concurrency-limit";
 import { isUrlBlocked } from "../scraper/WebScraper/utils/blocklist";
 import { BLOCKLISTED_URL_MESSAGE } from "../lib/strings";
@@ -71,7 +63,6 @@ import { supabase_service } from "../services/supabase";
 import { normalizeUrl, normalizeUrlOnlyHostname } from "../lib/canonical-url";
 import { saveExtract, updateExtract } from "../lib/extract/extract-redis";
 import { billTeam } from "./billing/credit_billing";
-import { saveCrawlMap } from "./indexing/crawl-maps-index";
 import { updateDeepResearch } from "../lib/deep-research/deep-research-redis";
 import { performDeepResearch } from "../lib/deep-research/deep-research-service";
 import { performGenerateLlmsTxt } from "../lib/generate-llmstxt/generate-llmstxt-service";
@@ -259,35 +250,6 @@ async function finishCrawlIfNeeded(job: Job & { id: string }, sc: StoredCrawl) {
 
     logger.info("Finishing crawl");
     await finishCrawl(job.data.crawl_id);
-
-    (async () => {
-      const originUrl = sc.originUrl
-        ? normalizeUrlOnlyHostname(sc.originUrl)
-        : undefined;
-      // Get all visited unique URLs from Redis
-      const visitedUrls = await redisEvictConnection.smembers(
-        "crawl:" + job.data.crawl_id + ":visited_unique",
-      );
-      // Upload to Supabase if we have URLs and this is a crawl (not a batch scrape)
-      if (
-        visitedUrls.length > 0 &&
-        job.data.crawlerOptions !== null &&
-        originUrl &&
-        process.env.USE_DB_AUTHENTICATION === "true"
-      ) {
-        // Queue the indexing job instead of doing it directly
-        await getIndexQueue().add(
-          job.data.crawl_id,
-          {
-            originUrl,
-            visitedUrls,
-          },
-          {
-            priority: 10,
-          },
-        );
-      }
-    })();
 
     if (!job.data.v1) {
       const jobIDs = await getCrawlJobs(job.data.crawl_id);
@@ -788,6 +750,11 @@ const workerFun = async (
 
       await sleep(cantAcceptConnectionInterval); // more sleep
       continue;
+    } else if (!currentLiveness) {
+      logger.info("Not accepting jobs because the liveness check failed");
+
+      await sleep(cantAcceptConnectionInterval);
+      continue;
     } else {
       cantAcceptConnectionCount = 0;
     }
@@ -803,67 +770,7 @@ const workerFun = async (
           runningJobs.delete(job.id);
         }
 
-        if (job.id && job.data.crawl_id && job.data.crawlerOptions?.delay) {
-          await removeCrawlConcurrencyLimitActiveJob(job.data.crawl_id, job.id);
-          cleanOldCrawlConcurrencyLimitEntries(job.data.crawl_id);
-
-          const delayInSeconds = job.data.crawlerOptions.delay;
-          const delayInMs = delayInSeconds * 1000;
-
-          await new Promise(resolve => setTimeout(resolve, delayInMs));
-
-          const nextCrawlJob = await takeCrawlConcurrencyLimitedJob(job.data.crawl_id);
-          if (nextCrawlJob !== null) {
-            await pushCrawlConcurrencyLimitActiveJob(job.data.crawl_id, nextCrawlJob.id, 60 * 1000);
-
-            await queue.add(
-              nextCrawlJob.id,
-              {
-                ...nextCrawlJob.data,
-              },
-              {
-                ...nextCrawlJob.opts,
-                jobId: nextCrawlJob.id,
-                priority: nextCrawlJob.priority,
-              },
-            );
-          }
-        }
-
-        if (job.id && job.data && job.data.team_id) {
-          const maxConcurrency = (await getACUCTeam(job.data.team_id, false, true, job.data.is_extract ? RateLimiterMode.Extract : RateLimiterMode.Crawl))?.concurrency ?? 2;
-
-          await removeConcurrencyLimitActiveJob(job.data.team_id, job.id);
-          await cleanOldConcurrencyLimitEntries(job.data.team_id);
-
-          // Check if we're under the concurrency limit before adding a new job
-          const currentActiveConcurrency = (await getConcurrencyLimitActiveJobs(job.data.team_id)).length;
-          const concurrencyLimited = currentActiveConcurrency >= maxConcurrency;
-
-          if (!concurrencyLimited) {
-            const nextJob = await takeConcurrencyLimitedJob(job.data.team_id);
-            if (nextJob !== null) {
-              await pushConcurrencyLimitActiveJob(
-                job.data.team_id,
-                nextJob.id,
-                60 * 1000,
-              ); // 60s initial timeout
-
-              await queue.add(
-                nextJob.id,
-                {
-                  ...nextJob.data,
-                  concurrencyLimitHit: true,
-                },
-                {
-                  ...nextJob.opts,
-                  jobId: nextJob.id,
-                  priority: nextJob.priority,
-                },
-              );
-            }
-          }
-        }
+        await concurrentJobDone(job);
       }
 
       if (job.data && job.data.sentry && Sentry.isInitialized()) {
@@ -1662,9 +1569,12 @@ async function processJob(job: Job & { id: string }, token: string) {
 // Start all workers
 const app = Express();
 
+let currentLiveness: boolean = true;
+
 app.get("/liveness", (req, res) => {
   // stalled check
   if (isWorkerStalled) {
+    currentLiveness = false;
     res.status(500).json({ ok: false });
   } else {
     // networking check
@@ -1677,9 +1587,11 @@ app.get("/liveness", (req, res) => {
       ignoreResponse: true,
     })
       .then(() => {
+        currentLiveness = true;
         res.status(200).json({ ok: true });
       }).catch(e => {
         _logger.error("WORKER NETWORKING CHECK FAILED", { error: e });
+        currentLiveness = false;
         res.status(500).json({ ok: false });
       });
   }

@@ -4,10 +4,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - apps/api/**
-  # schedule:
-  #   - cron: '0 */4 * * *'
 
 env:
   BULL_AUTH_KEY: ${{ secrets.BULL_AUTH_KEY }}
@@ -25,6 +21,7 @@ env:
   INDEX_SUPABASE_ANON_TOKEN: ${{ secrets.INDEX_SUPABASE_ANON_TOKEN }}
   INDEX_SUPABASE_URL: ${{ secrets.INDEX_SUPABASE_URL }}
   TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
+  TEST_API_KEY_CONCURRENCY: ${{ secrets.TEST_API_KEY_CONCURRENCY }}
   FIRE_ENGINE_BETA_URL: ${{ secrets.FIRE_ENGINE_BETA_URL }}
   USE_DB_AUTHENTICATION: true
   SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
@@ -41,6 +38,7 @@ env:
   VERTEX_CREDENTIALS: ${{ secrets.VERTEX_CREDENTIALS }}
   USE_GO_MARKDOWN_PARSER: true
   SENTRY_ENVIRONMENT: dev
+  IDMUX_URL: ${{ secrets.IDMUX_URL }}
 
 jobs:
   test:

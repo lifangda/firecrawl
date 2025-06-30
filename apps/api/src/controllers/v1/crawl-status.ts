@@ -22,7 +22,7 @@ import { configDotenv } from "dotenv";
 import type { Job, JobState, Queue } from "bullmq";
 import { logger } from "../../lib/logger";
 import { supabase_rr_service, supabase_service } from "../../services/supabase";
-import { getConcurrencyLimitedJobs, getCrawlConcurrencyLimitedJobs } from "../../lib/concurrency-limit";
+import { getConcurrencyLimitedJobs, getCrawlConcurrencyLimitActiveJobs } from "../../lib/concurrency-limit";
 import { getJobFromGCS } from "../../lib/gcs-jobs";
 configDotenv();
 
@@ -162,9 +162,8 @@ export async function crawlStatusController(
       ),
     );
 
-    const teamThrottledJobsSet = await getConcurrencyLimitedJobs(req.auth.team_id);
-    const crawlThrottledJobsSet = sc.crawlerOptions?.delay ? await getCrawlConcurrencyLimitedJobs(req.params.jobId) : new Set();
-    const throttledJobsSet = new Set([...teamThrottledJobsSet, ...crawlThrottledJobsSet]);
+    const throttledJobsSet = new Set(await getConcurrencyLimitedJobs(req.auth.team_id));
+    const activeJobsSet = new Set(await getCrawlConcurrencyLimitActiveJobs(req.params.jobId));
 
     const validJobStatuses: [string, JobState | "unknown"][] = [];
     const validJobIDs: string[] = [];
@@ -172,6 +171,9 @@ export async function crawlStatusController(
     for (const [id, status] of jobStatuses) {
       if (throttledJobsSet.has(id)) {
         validJobStatuses.push([id, "prioritized"]);
+        validJobIDs.push(id);
+      } else if (status === "unknown" && activeJobsSet.has(id)) {
+        validJobStatuses.push([id, "active"]);
         validJobIDs.push(id);
       } else if (
         status !== "failed" &&
@@ -220,45 +222,56 @@ export async function crawlStatusController(
         : 1
     )
   } else if (process.env.USE_DB_AUTHENTICATION === "true") {
-    const scrapeJobCount = await supabase_rr_service
-      .from("firecrawl_jobs")
-      .select("*", { count: "exact", head: true })
-      .eq("crawl_id", req.params.jobId)
-      .eq("team_id", req.auth.team_id)
-      .eq("success", true)
-      .throwOnError();
+    // TODO: move to read replica
+    const { data: scrapeJobCounts, error: scrapeJobError } = await supabase_service
+      .rpc("count_jobs_of_crawl_team", { i_crawl_id: req.params.jobId, i_team_id: req.auth.team_id });
 
-    const crawlJobQuery = await supabase_rr_service
+    if (scrapeJobError || !scrapeJobCounts || scrapeJobCounts.length === 0) {
+      logger.error("Error getting scrape job count", { error: scrapeJobError });
+      throw scrapeJobError;
+    }
+
+    const scrapeJobCount: number = scrapeJobCounts[0].count ?? 0;
+
+    const { data: crawlJobs, error: crawlJobError } = await supabase_rr_service
       .from("firecrawl_jobs")
       .select("*")
       .eq("job_id", req.params.jobId)
       .limit(1)
       .throwOnError();
+    
+    if (crawlJobError) {
+      logger.error("Error getting crawl job", { error: crawlJobError });
+      throw crawlJobError;
+    }
 
-    if (!crawlJobQuery.data || crawlJobQuery.data.length === 0) {
-      if (scrapeJobCount.count === 0) {
+    if (!crawlJobs || crawlJobs.length === 0) {
+      if (scrapeJobCount === 0) {
         return res.status(404).json({ success: false, error: "Job not found" });
       } else {
         status = "completed"; // fake completed to cut the losses
       }
     } else {
-      status = crawlJobQuery.data[0].success ? "completed" : "failed";
+      status = crawlJobs[0].success ? "completed" : "failed";
     }
 
-    const crawlJob = crawlJobQuery.data?.[0];
+    const crawlJob = crawlJobs[0];
 
     if (crawlJob && crawlJob.team_id !== req.auth.team_id) {
       return res.status(403).json({ success: false, error: "Forbidden" });
     }
 
+    const TEMP_FAIRE_TEAM_ID = "f96ad1a4-8102-4b35-9904-36fd517d3616";
+    
     if (
       crawlJob
+      && crawlJob.team_id !== TEMP_FAIRE_TEAM_ID
       && new Date().valueOf() - new Date(crawlJob.date_added).valueOf() > 24 * 60 * 60 * 1000
     ) {
       return res.status(404).json({ success: false, error: "Job expired" });
     }
 
-    doneJobsLength = scrapeJobCount.count!;
+    doneJobsLength = scrapeJobCount!;
     doneJobsOrder = [];
 
     const step = 1000;
@@ -296,7 +309,7 @@ export async function crawlStatusController(
       i++
     }
 
-    totalCount = scrapeJobCount.count ?? 0;
+    totalCount = scrapeJobCount ?? 0;
     creditsUsed = crawlJob?.credits_billed ?? totalCount;
   } else {
     return res.status(404).json({ success: false, error: "Job not found" });

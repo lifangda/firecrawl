@@ -16,18 +16,18 @@ import {
 import {
   ActionError,
   EngineError,
+  DNSResolutionError,
   SiteError,
   SSLError,
   TimeoutError,
   UnsupportedFileError,
 } from "../../error";
 import * as Sentry from "@sentry/node";
-import { Action } from "../../../../lib/entities";
 import { specialtyScrapeCheck } from "../utils/specialtyHandler";
 import { fireEngineDelete } from "./delete";
 import { MockState } from "../../lib/mock";
 import { getInnerJSON } from "../../../../lib/html-transformer";
-import { TimeoutSignal } from "../../../../controllers/v1/types";
+import { Action, TimeoutSignal } from "../../../../controllers/v1/types";
 
 // This function does not take `Meta` on purpose. It may not access any
 // meta values to construct the request -- that must be done by the
@@ -38,6 +38,7 @@ async function performFireEngineScrape<
     | FireEngineScrapeRequestPlaywright
     | FireEngineScrapeRequestTLSClient,
 >(
+  meta: Meta,
   logger: Logger,
   request: FireEngineScrapeRequestCommon & Engine,
   timeout: number,
@@ -86,6 +87,7 @@ async function performFireEngineScrape<
 
     try {
       status = await fireEngineCheckStatus(
+        meta,
         logger.child({ method: "fireEngineCheckStatus" }),
         scrape.jobId,
         mock,
@@ -98,6 +100,7 @@ async function performFireEngineScrape<
         error instanceof EngineError ||
         error instanceof SiteError ||
         error instanceof SSLError ||
+        error instanceof DNSResolutionError ||
         error instanceof ActionError ||
         error instanceof UnsupportedFileError
       ) {
@@ -209,7 +212,7 @@ export async function scrapeURLWithFireEngineChromeCDP(
 
   const request: FireEngineScrapeRequestCommon &
     FireEngineScrapeRequestChromeCDP = {
-    url: meta.url,
+    url: meta.rewrittenUrl ?? meta.url,
     engine: "chrome-cdp",
     instantReturn: true,
     skipTlsVerification: meta.options.skipTlsVerification,
@@ -230,6 +233,7 @@ export async function scrapeURLWithFireEngineChromeCDP(
   };
 
   let response = await performFireEngineScrape(
+    meta,
     meta.logger.child({
       method: "scrapeURLWithFireEngineChromeCDP/callFireEngine",
       request,
@@ -283,6 +287,7 @@ export async function scrapeURLWithFireEngineChromeCDP(
             screenshots: response.screenshots ?? [],
             scrapes: response.actionContent ?? [],
             javascriptReturns: (response.actionResults ?? []).filter(x => x.type === "executeJavascript").map(x => JSON.parse((x.result as any as { return: string }).return)),
+            pdfs: (response.actionResults ?? []).filter(x => x.type === "pdf").map(x => x.result.link),
           },
         }
       : {}),
@@ -298,7 +303,7 @@ export async function scrapeURLWithFireEnginePlaywright(
 
   const request: FireEngineScrapeRequestCommon &
     FireEngineScrapeRequestPlaywright = {
-    url: meta.url,
+    url: meta.rewrittenUrl ?? meta.url,
     engine: "playwright",
     instantReturn: true,
 
@@ -315,6 +320,7 @@ export async function scrapeURLWithFireEnginePlaywright(
   };
 
   let response = await performFireEngineScrape(
+    meta,
     meta.logger.child({
       method: "scrapeURLWithFireEngineChromeCDP/callFireEngine",
       request,
@@ -359,7 +365,7 @@ export async function scrapeURLWithFireEngineTLSClient(
 
   const request: FireEngineScrapeRequestCommon &
     FireEngineScrapeRequestTLSClient = {
-    url: meta.url,
+    url: meta.rewrittenUrl ?? meta.url,
     engine: "tlsclient",
     instantReturn: true,
 
@@ -375,6 +381,7 @@ export async function scrapeURLWithFireEngineTLSClient(
   };
 
   let response = await performFireEngineScrape(
+    meta,
     meta.logger.child({
       method: "scrapeURLWithFireEngineChromeCDP/callFireEngine",
       request,
