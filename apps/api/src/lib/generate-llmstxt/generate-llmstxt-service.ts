@@ -147,6 +147,7 @@ export async function performGenerateLlmsTxt(
                 origin: "llmstxt",
                 timeout: 30000,
                 isSingleUrl: true,
+                flags: acuc?.flags ?? null,
               },
               [],
               logger,
@@ -243,6 +244,7 @@ export async function performGenerateLlmsTxt(
       sources: {},
       cost_tracking: costTracking,
       credits_billed: urls.length,
+      zeroDataRetention: false,
     });
 
     // Bill team for usage

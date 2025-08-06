@@ -9,6 +9,7 @@ import {
   Document as V0Document,
 } from "../../lib/entities";
 import { InternalOptions } from "../../scraper/scrapeURL";
+import { getURLDepth } from "../../scraper/WebScraper/utils/maxDepthUtils";
 
 export enum IntegrationEnum {
   DIFY = "dify",
@@ -58,10 +59,10 @@ export const url = z.preprocess(
   z
     .string()
     .url()
-    .regex(/^https?:\/\//, "URL uses unsupported protocol")
+    .regex(/^https?:\/\//i, "URL uses unsupported protocol")
     .refine(
       (x) =>
-        /\.[a-zA-Z0-9-\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F]{2,}(:\d+)?([\/?#]|$)/i.test(
+        /(\.[a-zA-Z0-9-\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F]{2,}|\.xn--[a-zA-Z0-9-]{1,})(:\d+)?([\/?#]|$)/i.test(
           x,
         ),
       "URL must have a valid top-level domain or be a valid path",
@@ -94,7 +95,23 @@ export type AgentOptions = z.infer<typeof agentOptionsExtract>;
 export const extractOptions = z
   .object({
     mode: z.enum(["llm"]).default("llm"),
-    schema: z.any().optional(),
+    schema: z
+      .any()
+      .optional()
+      .refine(
+        (val) => {
+          if (!val) return true; // Allow undefined schema
+          try {
+            const validate = ajv.compile(val);
+            return typeof validate === "function";
+          } catch (e) {
+            return false;
+          }
+        },
+        {
+          message: "Invalid JSON schema.",
+        },
+      ),
     systemPrompt: z
       .string()
       .max(10000)
@@ -111,7 +128,23 @@ export const extractOptions = z
 export const extractOptionsWithAgent = z
   .object({
     mode: z.enum(["llm"]).default("llm"),
-    schema: z.any().optional(),
+    schema: z
+      .any()
+      .optional()
+      .refine(
+        (val) => {
+          if (!val) return true; // Allow undefined schema
+          try {
+            const validate = ajv.compile(val);
+            return typeof validate === "function";
+          } catch (e) {
+            return false;
+          }
+        },
+        {
+          message: "Invalid JSON schema.",
+        },
+      ),
     systemPrompt: z
       .string()
       .max(10000)
@@ -240,6 +273,13 @@ export const actionsSchema = z
     },
   );
 
+function transformIframeSelector(selector: string): string {
+  return selector.replace(/(?:^|[\s,])iframe(?=\s|$|[.#\[:,])/g, (match) => {
+    const prefix = match.match(/^[\s,]/)?.[0] || '';
+    return prefix + 'div[data-original-tag="iframe"]';
+  });
+}
+
 const baseScrapeOptions = z
   .object({
     formats: z
@@ -266,8 +306,12 @@ const baseScrapeOptions = z
         "The changeTracking format requires the markdown format to be specified as well",
       ),
     headers: z.record(z.string(), z.string()).optional(),
-    includeTags: z.string().array().optional(),
-    excludeTags: z.string().array().optional(),
+    includeTags: z.string().array()
+      .transform(tags => tags.map(transformIframeSelector))
+      .optional(),
+    excludeTags: z.string().array()
+      .transform(tags => tags.map(transformIframeSelector))
+      .optional(),
     onlyMainContent: z.boolean().default(true),
     timeout: z.number().int().positive().finite().safe().optional(),
     waitFor: z
@@ -285,7 +329,23 @@ const baseScrapeOptions = z
     changeTrackingOptions: z
       .object({
         prompt: z.string().optional(),
-        schema: z.any().optional(),
+        schema: z
+          .any()
+          .optional()
+          .refine(
+            (val) => {
+              if (!val) return true; // Allow undefined schema
+              try {
+                const validate = ajv.compile(val);
+                return typeof validate === "function";
+              } catch (e) {
+                return false;
+              }
+            },
+            {
+              message: "Invalid JSON schema.",
+            },
+          ),
         modes: z.enum(["json", "git-diff"]).array().optional().default([]),
         tag: z.string().or(z.null()).default(null),
       })
@@ -342,6 +402,8 @@ const baseScrapeOptions = z
     // @deprecated
     __experimental_cache: z.boolean().default(false).optional(),
     __searchPreviewToken: z.string().optional(),
+    __experimental_omce: z.boolean().default(false).optional(),
+    __experimental_omceDomain: z.string().optional(),
   })
   .strict(strictMessage);
 
@@ -353,6 +415,19 @@ const fire1Refine = (obj) => {
 }
 const fire1RefineOpts = {
   message: "You may only specify the FIRE-1 model in agent or jsonOptions.agent, but not both.",
+};
+const waitForRefine = (obj) => {
+  if (obj.waitFor && obj.timeout) {
+    if (typeof obj.timeout !== 'number' || obj.timeout <= 0) {
+      return false;
+    }
+    return obj.waitFor <= obj.timeout / 2;
+  }
+  return true;
+};
+const waitForRefineOpts = {
+  message: "waitFor must not exceed half of timeout",
+  path: ["waitFor"],
 };
 const extractRefine = (obj) => {
   const hasExtractFormat = obj.formats?.includes("extract");
@@ -446,6 +521,7 @@ export const scrapeOptions = baseScrapeOptions
   )
   .refine(extractRefine, extractRefineOpts)
   .refine(fire1Refine, fire1RefineOpts)
+  .refine(waitForRefine, waitForRefineOpts)
   .transform(extractTransform);
 
 export type BaseScrapeOptions = z.infer<typeof baseScrapeOptions>;
@@ -530,6 +606,10 @@ export const extractV1Options = z
     (x) => (x.scrapeOptions ? fire1Refine(x.scrapeOptions) : true),
     fire1RefineOpts,
   )
+  .refine(
+    (x) => (x.scrapeOptions ? waitForRefine(x.scrapeOptions) : true),
+    waitForRefineOpts,
+  )
   .transform((x) => ({
     ...x,
     scrapeOptions: x.scrapeOptions
@@ -559,10 +639,12 @@ export const scrapeRequestSchema = baseScrapeOptions
     origin: z.string().optional().default("api"),
     integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
     timeout: z.number().int().positive().finite().safe().default(30000),
+    zeroDataRetention: z.boolean().optional(),
   })
   .strict(strictMessage)
   .refine(extractRefine, extractRefineOpts)
   .refine(fire1Refine, fire1RefineOpts)
+  .refine(waitForRefine, waitForRefineOpts)
   .transform(extractTransform);
 
 export type ScrapeRequest = z.infer<typeof scrapeRequestSchema>;
@@ -597,10 +679,12 @@ export const batchScrapeRequestSchema = baseScrapeOptions
     appendToId: z.string().uuid().optional(),
     ignoreInvalidURLs: z.boolean().default(false),
     maxConcurrency: z.number().positive().int().optional(),
+    zeroDataRetention: z.boolean().optional(),
   })
   .strict(strictMessage)
   .refine(extractRefine, extractRefineOpts)
   .refine(fire1Refine, fire1RefineOpts)
+  .refine(waitForRefine, waitForRefineOpts)
   .transform(extractTransform);
 
 export const batchScrapeRequestSchemaNoURLValidation = baseScrapeOptions
@@ -612,10 +696,12 @@ export const batchScrapeRequestSchemaNoURLValidation = baseScrapeOptions
     appendToId: z.string().uuid().optional(),
     ignoreInvalidURLs: z.boolean().default(false),
     maxConcurrency: z.number().positive().int().optional(),
+    zeroDataRetention: z.boolean().optional(),
   })
   .strict(strictMessage)
   .refine(extractRefine, extractRefineOpts)
   .refine(fire1Refine, fire1RefineOpts)
+  .refine(waitForRefine, waitForRefineOpts)
   .transform(extractTransform);
 
 export type BatchScrapeRequest = z.infer<typeof batchScrapeRequestSchema>;
@@ -663,10 +749,26 @@ export const crawlRequestSchema = crawlerOptions
     webhook: webhookSchema.optional(),
     limit: z.number().default(10000),
     maxConcurrency: z.number().positive().int().optional(),
+    zeroDataRetention: z.boolean().optional(),
   })
   .strict(strictMessage)
   .refine((x) => extractRefine(x.scrapeOptions), extractRefineOpts)
   .refine((x) => fire1Refine(x.scrapeOptions), fire1RefineOpts)
+  .refine((x) => waitForRefine(x.scrapeOptions), waitForRefineOpts)
+  .refine(
+    (data) => {
+      try {
+        const urlDepth = getURLDepth(data.url);
+        return urlDepth <= data.maxDepth;
+      } catch (e) {
+        return false;
+      }
+    },
+    {
+      message: "URL depth exceeds the specified maxDepth",
+      path: ["url"]
+    }
+  )
   .transform((x) => {
     if (x.crawlEntireDomain !== undefined) {
       x.allowBackwardLinks = x.crawlEntireDomain;
@@ -938,6 +1040,7 @@ export type OngoingCrawlsResponse =
       id: string;
       teamId: string;
       url: string;
+      created_at: string;
       options: CrawlerOptions;
     }[];
   };
@@ -1002,6 +1105,12 @@ export type AuthCreditUsageChunk = {
 export type TeamFlags = {
   ignoreRobots?: boolean;
   unblockedDomains?: string[];
+  forceZDR?: boolean;
+  allowZDR?: boolean;
+  zdrCost?: number;
+  checkRobotsOnScrape?: boolean;
+  allowTeammateInvites?: boolean;
+  crawlTtlHours?: number;
 } | null;
 
 export type AuthCreditUsageChunkFromTeam = Omit<AuthCreditUsageChunk, "api_key">;
@@ -1269,6 +1378,7 @@ export const searchRequestSchema = z
               "screenshot",
               "screenshot@fullPage",
               "extract",
+              "json",
             ]),
           )
           .default([]),
@@ -1280,6 +1390,7 @@ export const searchRequestSchema = z
   )
   .refine((x) => extractRefine(x.scrapeOptions), extractRefineOpts)
   .refine((x) => fire1Refine(x.scrapeOptions), fire1RefineOpts)
+  .refine((x) => waitForRefine(x.scrapeOptions), waitForRefineOpts)
   .transform((x) => ({
     ...x,
     scrapeOptions: extractTransform(x.scrapeOptions),

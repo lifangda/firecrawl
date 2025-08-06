@@ -122,6 +122,7 @@ import { getACUCTeam } from "../../../controllers/auth";
         num_tokens: 0,
         tokens_billed: 0,
         sources,
+        zeroDataRetention: false, // not supported
       });
       return {
         success: false,
@@ -224,6 +225,7 @@ import { getACUCTeam } from "../../../controllers/auth";
         num_tokens: 0,
         tokens_billed: 0,
         sources,
+        zeroDataRetention: false, // not supported
       });
       return {
         success: false,
@@ -342,6 +344,7 @@ import { getACUCTeam } from "../../../controllers/auth";
               teamId,
               origin: "extract",
               timeout,
+              flags: acuc?.flags ?? null,
             },
             urlTraces,
             logger.child({
@@ -574,6 +577,7 @@ import { getACUCTeam } from "../../../controllers/auth";
           num_tokens: 0,
           tokens_billed: 0,
           sources,
+          zeroDataRetention: false, // not supported
         });
         return {
           success: false,
@@ -621,6 +625,7 @@ import { getACUCTeam } from "../../../controllers/auth";
               teamId,
               origin: "extract",
               timeout,
+              flags: acuc?.flags ?? null,
             },
             urlTraces,
             logger.child({
@@ -670,6 +675,7 @@ import { getACUCTeam } from "../../../controllers/auth";
           num_tokens: 0,
           tokens_billed: 0,
           sources,
+          zeroDataRetention: false, // not supported
         });
         return {
           success: false,
@@ -699,6 +705,7 @@ import { getACUCTeam } from "../../../controllers/auth";
           num_tokens: 0,
           tokens_billed: 0,
           sources,
+          zeroDataRetention: false, // not supported
         });
         return {
           success: false,
@@ -861,6 +868,7 @@ import { getACUCTeam } from "../../../controllers/auth";
       num_tokens: totalTokensUsed,
       tokens_billed: tokensToBill,
       sources,
+      zeroDataRetention: false, // not supported
     }).then(() => {
       updateExtract(extractId, {
         status: "completed",

@@ -21,6 +21,7 @@ import {
   SSLError,
   TimeoutError,
   UnsupportedFileError,
+  FEPageLoadFailed,
 } from "../../error";
 import * as Sentry from "@sentry/node";
 import { specialtyScrapeCheck } from "../utils/specialtyHandler";
@@ -44,12 +45,14 @@ async function performFireEngineScrape<
   timeout: number,
   mock: MockState | null,
   abort?: AbortSignal,
+  production = true,
 ): Promise<FireEngineCheckStatusSuccess> {
   const scrape = await fireEngineScrape(
     logger.child({ method: "fireEngineScrape" }),
     request,
     mock,
     abort,
+    production,
   );
 
   const startTime = Date.now();
@@ -68,6 +71,8 @@ async function performFireEngineScrape<
         }),
         scrape.jobId,
         mock,
+        undefined,
+        production,
       );
       throw new Error("Error limit hit. See e.cause.errors for errors.", {
         cause: { errors },
@@ -92,6 +97,7 @@ async function performFireEngineScrape<
         scrape.jobId,
         mock,
         abort,
+        production,
       );
     } catch (error) {
       if (error instanceof StillProcessingError) {
@@ -102,7 +108,8 @@ async function performFireEngineScrape<
         error instanceof SSLError ||
         error instanceof DNSResolutionError ||
         error instanceof ActionError ||
-        error instanceof UnsupportedFileError
+        error instanceof UnsupportedFileError ||
+        error instanceof FEPageLoadFailed
       ) {
         fireEngineDelete(
           logger.child({
@@ -111,6 +118,8 @@ async function performFireEngineScrape<
           }),
           scrape.jobId,
           mock,
+          undefined,
+          production,
         );
         logger.debug("Fire-engine scrape job failed.", {
           error,
@@ -125,6 +134,8 @@ async function performFireEngineScrape<
           }),
           scrape.jobId,
           mock,
+          undefined,
+          production,
         );
         throw error;
       } else {
@@ -168,6 +179,8 @@ async function performFireEngineScrape<
     }),
     scrape.jobId,
     mock,
+    undefined,
+    production,
   );
 
   return status;
@@ -210,6 +223,9 @@ export async function scrapeURLWithFireEngineChromeCDP(
 
   const timeout = (timeToRun ?? 300000) + totalWait;
 
+  // const shouldABTest = false;
+  const shouldABTest = !meta.internalOptions.zeroDataRetention && Math.random() <= (1/30);
+
   const request: FireEngineScrapeRequestCommon &
     FireEngineScrapeRequestChromeCDP = {
     url: meta.rewrittenUrl ?? meta.url,
@@ -228,9 +244,34 @@ export async function scrapeURLWithFireEngineChromeCDP(
     timeout, // TODO: better timeout logic
     disableSmartWaitCache: meta.internalOptions.disableSmartWaitCache,
     mobileProxy: meta.featureFlags.has("stealthProxy"),
-    saveScrapeResultToGCS: meta.internalOptions.saveScrapeResultToGCS,
-    // TODO: scrollXPaths
+    saveScrapeResultToGCS: !meta.internalOptions.zeroDataRetention && meta.internalOptions.saveScrapeResultToGCS,
+    zeroDataRetention: meta.internalOptions.zeroDataRetention,
   };
+
+  if (shouldABTest) {
+    (async () => {
+      try {
+        meta.logger.info("AB-testing fire-engine", { request });
+
+        await performFireEngineScrape(
+          meta,
+          meta.logger.child({
+            method: "scrapeURLWithFireEngineChromeCDP/callFireEngineAB",
+            request,
+          }),
+          request,
+          timeout,
+          meta.mock,
+          meta.internalOptions.abort ?? AbortSignal.timeout(timeout),
+          false,
+        );
+
+        meta.logger.info("AB-testing fire-engine success", { request });
+      } catch (error) {
+        meta.logger.error("AB-testing fire-engine failed", { error });
+      }
+    })();
+  }
 
   let response = await performFireEngineScrape(
     meta,
@@ -242,6 +283,7 @@ export async function scrapeURLWithFireEngineChromeCDP(
     timeout,
     meta.mock,
     meta.internalOptions.abort ?? AbortSignal.timeout(timeout),
+    true,
   );
 
   if (
@@ -291,6 +333,8 @@ export async function scrapeURLWithFireEngineChromeCDP(
           },
         }
       : {}),
+
+    proxyUsed: response.usedMobileProxy ? "stealth" : "basic",
   };
 }
 
@@ -317,12 +361,14 @@ export async function scrapeURLWithFireEnginePlaywright(
     mobileProxy: meta.featureFlags.has("stealthProxy"),
 
     timeout,
+    saveScrapeResultToGCS: !meta.internalOptions.zeroDataRetention && meta.internalOptions.saveScrapeResultToGCS,
+    zeroDataRetention: meta.internalOptions.zeroDataRetention,
   };
 
   let response = await performFireEngineScrape(
     meta,
     meta.logger.child({
-      method: "scrapeURLWithFireEngineChromeCDP/callFireEngine",
+      method: "scrapeURLWithFireEnginePlaywright/callFireEngine",
       request,
     }),
     request,
@@ -354,6 +400,8 @@ export async function scrapeURLWithFireEnginePlaywright(
           screenshot: response.screenshots[0],
         }
       : {}),
+
+    proxyUsed: response.usedMobileProxy ? "stealth" : "basic",
   };
 }
 
@@ -378,12 +426,14 @@ export async function scrapeURLWithFireEngineTLSClient(
     mobileProxy: meta.featureFlags.has("stealthProxy"),
 
     timeout,
+    saveScrapeResultToGCS: !meta.internalOptions.zeroDataRetention && meta.internalOptions.saveScrapeResultToGCS,
+    zeroDataRetention: meta.internalOptions.zeroDataRetention,
   };
 
   let response = await performFireEngineScrape(
     meta,
     meta.logger.child({
-      method: "scrapeURLWithFireEngineChromeCDP/callFireEngine",
+      method: "scrapeURLWithFireEngineTLSClient/callFireEngine",
       request,
     }),
     request,
@@ -409,5 +459,7 @@ export async function scrapeURLWithFireEngineTLSClient(
     contentType: (Object.entries(response.responseHeaders ?? {}).find(
       (x) => x[0].toLowerCase() === "content-type",
     ) ?? [])[1] ?? undefined,
+
+    proxyUsed: response.usedMobileProxy ? "stealth" : "basic",
   };
 }

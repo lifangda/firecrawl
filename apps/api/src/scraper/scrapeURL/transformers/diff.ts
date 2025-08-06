@@ -59,6 +59,11 @@ function compareExtractedData(previousData: any, currentData: any): any {
 
 export async function deriveDiff(meta: Meta, document: Document): Promise<Document> {
   if (meta.options.formats.includes("changeTracking")) {
+    if (meta.internalOptions.zeroDataRetention) {
+        document.warning = "Change tracking is not supported with zero data retention." + (document.warning ? " " + document.warning : "")
+        return document;
+    }
+    
     const start = Date.now();
     const res = await supabase_service
         .rpc("diff_get_last_scrape_4", {
@@ -79,7 +84,6 @@ export async function deriveDiff(meta: Meta, document: Document): Promise<Docume
     const job: {
         returnvalue: Document,
     } | null = data?.o_job_id ? await getJob(data.o_job_id) : null;
-
     if (data && job && job?.returnvalue) {
         const previousMarkdown = job.returnvalue.markdown!;
         const currentMarkdown = document.markdown!;
@@ -99,10 +103,10 @@ export async function deriveDiff(meta: Meta, document: Document): Promise<Docume
                 color: false,
                 wordDiff: false
             });
-            meta.logger.debug("Diff text", { diffText });
+            // meta.logger.debug("Diff text", { diffText });
             if (diffText) {
                 const diffStructured = parseDiff(diffText);
-                meta.logger.debug("Diff structured", { diffStructured });
+                // meta.logger.debug("Diff structured", { diffStructured });
                 document.changeTracking.diff = {
                     text: diffText,
                     json: {

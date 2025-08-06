@@ -1,4 +1,4 @@
-import { scrape, scrapeStatus, scrapeWithFailure, scrapeTimeout, indexCooldown, idmux, Identity } from "./lib";
+import { scrape, scrapeWithFailure, scrapeStatus, scrapeTimeout, indexCooldown, idmux, Identity, scrapeRaw } from "./lib";
 import crypto from "crypto";
 
 let identity: Identity;
@@ -46,6 +46,79 @@ describe("Scrape tests", () => {
     expect(response.markdown).toContain("Firecrawl");
   }, scrapeTimeout);
 
+  describe("waitFor validation", () => {
+    it.concurrent("allows waitFor when it's less than half of timeout", async () => {
+      const response = await scrape({
+        url: "http://firecrawl.dev",
+        waitFor: 5000,
+        timeout: 15000,
+      }, identity);
+
+      expect(response.markdown).toContain("Firecrawl");
+    }, scrapeTimeout);
+
+    // TODO: does not make sense. reevaluate - mogery
+    // it.concurrent("allows waitFor when it's exactly half of timeout", async () => {
+    //   const response = await scrape({
+    //     url: "http://firecrawl.dev",
+    //     waitFor: 7500,
+    //     timeout: 15000,
+    //   }, identity);
+
+    //   expect(response.markdown).toContain("Firecrawl");
+    // }, scrapeTimeout);
+
+    it.concurrent("rejects waitFor when it exceeds half of timeout", async () => {
+      const raw = await scrapeRaw({
+        url: "http://firecrawl.dev",
+        waitFor: 8000,
+        timeout: 15000,
+      }, identity);
+
+      expect(raw.statusCode).toBe(400);
+      expect(raw.body.success).toBe(false);
+      expect(raw.body.error).toBe("Bad Request");
+      expect(raw.body.details).toBeDefined();
+      expect(JSON.stringify(raw.body.details)).toContain("waitFor must not exceed half of timeout");
+    }, scrapeTimeout);
+
+    it.concurrent("rejects waitFor when it equals timeout", async () => {
+      const raw = await scrapeRaw({
+        url: "http://firecrawl.dev",
+        waitFor: 15000,
+        timeout: 15000,
+      }, identity);
+
+      expect(raw.statusCode).toBe(400);
+      expect(raw.body.success).toBe(false);
+      expect(raw.body.error).toBe("Bad Request");
+      expect(raw.body.details).toBeDefined();
+      expect(JSON.stringify(raw.body.details)).toContain("waitFor must not exceed half of timeout");
+    }, scrapeTimeout);
+
+    it.concurrent("rejects waitFor when it exceeds timeout", async () => {
+      const raw = await scrapeRaw({
+        url: "http://firecrawl.dev",
+        waitFor: 20000,
+        timeout: 15000,
+      }, identity);
+
+      expect(raw.statusCode).toBe(400);
+      expect(raw.body.success).toBe(false);
+      expect(raw.body.error).toBe("Bad Request");
+      expect(raw.body.details).toBeDefined();
+      expect(JSON.stringify(raw.body.details)).toContain("waitFor must not exceed half of timeout");
+    }, scrapeTimeout);
+  });
+
+  // TEMP: domain broken
+  // it.concurrent("works with Punycode domains", async () => {
+  //   await scrape({
+  //     url: "http://xn--1lqv92a901a.xn--ses554g/",
+  //     timeout: scrapeTimeout,
+  //   }, identity);
+  // }, scrapeTimeout);
+
   it.concurrent("handles non-UTF-8 encodings", async () => {
     const response = await scrape({
       url: "https://www.rtpro.yamaha.co.jp/RT/docs/misc/kanji-sjis.html",
@@ -54,6 +127,17 @@ describe("Scrape tests", () => {
 
     expect(response.markdown).toContain("ぐ け げ こ ご さ ざ し じ す ず せ ぜ そ ぞ た");
   }, scrapeTimeout);
+
+  it.concurrent("links format works", async () => {
+    const response = await scrape({
+      url: "https://firecrawl.dev",
+      formats: ["links"],
+      timeout: scrapeTimeout,
+    }, identity);
+
+    expect(response.links).toBeDefined();
+    expect(response.links?.length).toBeGreaterThan(0);
+  });
 
   if (process.env.TEST_SUITE_SELF_HOSTED && process.env.PROXY_SERVER) {
     it.concurrent("self-hosted proxy works", async () => {
@@ -881,4 +965,29 @@ describe("Scrape tests", () => {
 
     expect(response.markdown).toContain("```json");
   }, scrapeTimeout);
+
+  describe("__experimental_omceDomain functionality", () => {
+    it.concurrent("should accept __experimental_omceDomain flag in scrape request", async () => {
+      const response = await scrape({
+        url: "https://httpbin.org/html",
+        __experimental_omceDomain: "fake-domain.com",
+        timeout: scrapeTimeout,
+      }, identity);
+
+      expect(response.markdown).toBeDefined();
+      expect(response.metadata).toBeDefined();
+    }, scrapeTimeout);
+
+    it.concurrent("should work with __experimental_omceDomain and other experimental flags", async () => {
+      const response = await scrape({
+        url: "https://httpbin.org/html",
+        __experimental_omceDomain: "test-domain.org",
+        __experimental_omce: true,
+        timeout: scrapeTimeout,
+      }, identity);
+
+      expect(response.markdown).toBeDefined();
+      expect(response.metadata).toBeDefined();
+    }, scrapeTimeout);
+  });
 });

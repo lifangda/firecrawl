@@ -11,6 +11,8 @@ import { acucCacheClearController } from "../controllers/v0/admin/acuc-cache-cle
 import { checkFireEngine } from "../controllers/v0/admin/check-fire-engine";
 import { cclogController } from "../controllers/v0/admin/cclog";
 import { indexQueuePrometheus } from "../controllers/v0/admin/index-queue-prometheus";
+import { zdrcleanerController } from "../controllers/v0/admin/zdrcleaner";
+import { triggerPrecrawl } from "../controllers/v0/admin/precrawl";
 
 export const adminRouter = express.Router();
 
@@ -52,6 +54,17 @@ adminRouter.get(
 );
 
 adminRouter.get(
+  `/admin/${process.env.BULL_AUTH_KEY}/zdrcleaner`,
+  wrap(zdrcleanerController),
+);
+
+
+adminRouter.get(
   `/admin/${process.env.BULL_AUTH_KEY}/index-queue-prometheus`,
   wrap(indexQueuePrometheus),
+);
+
+adminRouter.get(
+  `/admin/${process.env.BULL_AUTH_KEY}/precrawl`,
+  wrap(triggerPrecrawl),
 );

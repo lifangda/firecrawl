@@ -119,6 +119,8 @@ export type EngineScrapeResult = {
   };
   
   contentType?: string;
+
+  proxyUsed: "basic" | "stealth";
 };
 
 const engineHandlers: {
@@ -421,6 +423,7 @@ export function buildFallbackList(meta: Meta): {
   const shouldUseIndex =
     useIndex
     && process.env.FIRECRAWL_INDEX_WRITE_ONLY !== "true"
+    && meta.options.waitFor === 0
     && !meta.options.formats.includes("changeTracking")
     && meta.options.maxAge !== 0
     && (

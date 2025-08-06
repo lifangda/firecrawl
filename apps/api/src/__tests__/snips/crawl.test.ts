@@ -1,5 +1,6 @@
-import { asyncCrawl, asyncCrawlWaitForFinish, crawl, crawlOngoing, Identity, idmux, scrapeTimeout } from "./lib";
+import { asyncCrawl, asyncCrawlWaitForFinish, crawl, crawlOngoing, crawlStart, Identity, idmux, scrapeTimeout } from "./lib";
 import { describe, it, expect } from "@jest/globals";
+import { filterLinks } from "../../lib/crawler";
 
 let identity: Identity;
 
@@ -13,10 +14,22 @@ beforeAll(async () => {
 
 describe("Crawl tests", () => {
     it.concurrent("works", async () => {
-        await crawl({
+        const results = await crawl({
             url: "https://firecrawl.dev",
             limit: 10,
         }, identity);
+
+        expect(results.completed).toBe(10);
+    }, 10 * scrapeTimeout);
+
+    it.concurrent("works with ignoreSitemap: true", async () => {
+        const results = await crawl({
+            url: "https://firecrawl.dev",
+            limit: 10,
+            ignoreSitemap: true,
+        }, identity);
+
+        expect(results.completed).toBe(10);
     }, 10 * scrapeTimeout);
 
     it.concurrent("filters URLs properly", async () => {
@@ -60,14 +73,32 @@ describe("Crawl tests", () => {
     }, 3 * scrapeTimeout + 3 * 5000);
 
     it.concurrent("ongoing crawls endpoint works", async () => {
+        const beforeCrawl = new Date();
+        
         const res = await asyncCrawl({
             url: "https://firecrawl.dev",
             limit: 3,
         }, identity);
 
         const ongoing = await crawlOngoing(identity);
-
-        expect(ongoing.crawls.find(x => x.id === res.id)).toBeDefined();
+        const afterCrawl = new Date();
+        
+        const crawlItem = ongoing.crawls.find(x => x.id === res.id);
+        expect(crawlItem).toBeDefined();
+        
+        if (crawlItem) {
+            expect(crawlItem.created_at).toBeDefined();
+            expect(typeof crawlItem.created_at).toBe("string");
+            
+            const createdAtDate = new Date(crawlItem.created_at);
+            expect(createdAtDate).toBeInstanceOf(Date);
+            expect(createdAtDate.getTime()).not.toBeNaN();
+            
+            expect(crawlItem.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+            
+            expect(createdAtDate.getTime()).toBeGreaterThanOrEqual(beforeCrawl.getTime() - 1000);
+            expect(createdAtDate.getTime()).toBeLessThanOrEqual(afterCrawl.getTime() + 1000);
+        }
 
         await asyncCrawlWaitForFinish(res.id, identity);
 
@@ -179,4 +210,152 @@ describe("Crawl tests", () => {
             }
         }
     }, 5 * scrapeTimeout);
+
+    it.concurrent("allowSubdomains correctly allows same registrable domain using PSL", async () => {
+        const res = await crawl({
+            url: "https://firecrawl.dev",
+            allowSubdomains: true,
+            allowExternalLinks: false,
+            limit: 3,
+        }, identity);
+
+        expect(res.success).toBe(true);
+        if (res.success) {
+            expect(res.data.length).toBeGreaterThan(0);
+            for (const page of res.data) {
+                const url = new URL(page.metadata.url ?? page.metadata.sourceURL!);
+                const hostname = url.hostname;
+                
+                expect(
+                    hostname === "firecrawl.dev" || 
+                    hostname.endsWith(".firecrawl.dev")
+                ).toBe(true);
+            }
+        }
+    }, 5 * scrapeTimeout);
+
+    it.concurrent("rejects crawl when URL depth exceeds maxDepth", async () => {
+        const response = await crawlStart({
+            url: "https://firecrawl.dev/blog/category/deep/nested/path",
+            maxDepth: 2,
+            limit: 5,
+        }, identity);
+
+        expect(response.statusCode).toBe(400);
+        expect(response.body.success).toBe(false);
+        expect(response.body.error).toBe("Bad Request");
+        expect(response.body.details).toBeDefined();
+        expect(response.body.details[0].message).toBe("URL depth exceeds the specified maxDepth");
+        expect(response.body.details[0].path).toEqual(["url"]);
+    });
+
+    it.concurrent("accepts crawl when URL depth equals maxDepth", async () => {
+        const response = await crawlStart({
+            url: "https://firecrawl.dev/blog/category",
+            maxDepth: 2,
+            limit: 5,
+        }, identity);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(typeof response.body.id).toBe("string");
+    });
+
+    it.concurrent("accepts crawl when URL depth is less than maxDepth", async () => {
+        const response = await crawlStart({
+            url: "https://firecrawl.dev/blog",
+            maxDepth: 5,
+            limit: 5,
+        }, identity);
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(typeof response.body.id).toBe("string");
+    });
+});
+
+describe("Robots.txt FFI Integration tests", () => {
+    it.concurrent("handles normal robots.txt parsing via FFI", async () => {
+        
+        const result = await filterLinks({
+            links: ['https://example.com/allowed', 'https://example.com/disallowed'],
+            limit: 10,
+            max_depth: 10,
+            base_url: 'https://example.com',
+            initial_url: 'https://example.com',
+            regex_on_full_url: false,
+            excludes: [],
+            includes: [],
+            allow_backward_crawling: true,
+            ignore_robots_txt: false,
+            robots_txt: 'User-agent: *\nDisallow: /disallowed'
+        });
+        
+        expect(result.links).toHaveLength(1);
+        expect(result.links[0]).toBe('https://example.com/allowed');
+        expect(result.denial_reasons.has('https://example.com/disallowed')).toBe(true);
+        expect(result.denial_reasons.get('https://example.com/disallowed')).toBe('ROBOTS_TXT');
+    }, 10000);
+
+    it.concurrent("handles malformed robots.txt without crashing via FFI", async () => {
+        
+        const result = await filterLinks({
+            links: ['https://example.com/test'],
+            limit: 10,
+            max_depth: 10,
+            base_url: 'https://example.com',
+            initial_url: 'https://example.com',
+            regex_on_full_url: false,
+            excludes: [],
+            includes: [],
+            allow_backward_crawling: true,
+            ignore_robots_txt: false,
+            robots_txt: 'Invalid robots.txt content with \x00 null bytes and malformed syntax'
+        });
+        
+        expect(result.links).toHaveLength(1);
+        expect(result.links[0]).toBe('https://example.com/test');
+    }, 10000);
+
+    it.concurrent("handles non-UTF8 robots.txt content without crashing via FFI", async () => {
+        
+        const nonUtf8Content = String.fromCharCode(0xFF, 0xFE) + 'User-agent: *\nDisallow: /blocked';
+        const result = await filterLinks({
+            links: ['https://example.com/allowed'],
+            limit: 10,
+            max_depth: 10,
+            base_url: 'https://example.com',
+            initial_url: 'https://example.com',
+            regex_on_full_url: false,
+            excludes: [],
+            includes: [],
+            allow_backward_crawling: true,
+            ignore_robots_txt: false,
+            robots_txt: nonUtf8Content
+        });
+        
+        expect(result.links).toHaveLength(1);
+        expect(result.links[0]).toBe('https://example.com/allowed');
+    }, 10000);
+
+    it.concurrent("handles char boundary issues without crashing via FFI", async () => {
+        
+        const problematicContent = 'User-agent: *\nDisallow: /\u{a0}test';
+        const result = await filterLinks({
+            links: ['https://example.com/safe'],
+            limit: 10,
+            max_depth: 10,
+            base_url: 'https://example.com',
+            initial_url: 'https://example.com',
+            regex_on_full_url: false,
+            excludes: [],
+            includes: [],
+            allow_backward_crawling: true,
+            ignore_robots_txt: false,
+            robots_txt: problematicContent
+        });
+        
+        expect(result.links).toHaveLength(1);
+        expect(result.links[0]).toBe('https://example.com/safe');
+    }, 10000);
 });

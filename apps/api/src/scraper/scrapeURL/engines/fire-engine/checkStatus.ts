@@ -9,10 +9,11 @@ import {
   SiteError,
   SSLError,
   UnsupportedFileError,
-  DNSResolutionError
+  DNSResolutionError,
+  FEPageLoadFailed
 } from "../../error";
 import { MockState } from "../../lib/mock";
-import { fireEngineURL } from "./scrape";
+import { fireEngineStagingURL, fireEngineURL } from "./scrape";
 import { getDocFromGCS } from "../../../../lib/gcs-jobs";
 import { Meta } from "../..";
 
@@ -94,6 +95,8 @@ const successSchema = z.object({
     .or(z.null()),
 
   docUrl: z.string().optional(),
+
+  usedMobileProxy: z.boolean().optional(),
 });
 
 export type FireEngineCheckStatusSuccess = z.infer<typeof successSchema>;
@@ -130,32 +133,16 @@ export async function fireEngineCheckStatus(
   jobId: string,
   mock: MockState | null,
   abort?: AbortSignal,
+  production = true,
 ): Promise<FireEngineCheckStatusSuccess> {
-  let status = await Sentry.startSpan(
-    {
-      name: "fire-engine: Check status",
-      attributes: {
-        jobId,
-      },
-    },
-    async (span) => {
-      return await robustFetch({
-        url: `${fireEngineURL}/scrape/${jobId}`,
-        method: "GET",
-        logger: logger.child({ method: "fireEngineCheckStatus/robustFetch" }),
-        headers: {
-          ...(Sentry.isInitialized()
-            ? {
-                "sentry-trace": Sentry.spanToTraceHeader(span),
-                baggage: Sentry.spanToBaggageHeader(span),
-              }
-            : {}),
-        },
-        mock,
-        abort,
-      });
-    },
-  );
+  let status = await robustFetch({
+    url: `${production ? fireEngineURL : fireEngineStagingURL}/scrape/${jobId}`,
+    method: "GET",
+    logger: logger.child({ method: "fireEngineCheckStatus/robustFetch" }),
+    headers: {},
+    mock,
+    abort,
+  });
 
   // Fire-engine now saves the content to GCS
   if (!status.content && status.docUrl) {
@@ -200,6 +187,12 @@ export async function fireEngineCheckStatus(
       throw new UnsupportedFileError(
         "File size exceeds " + status.error.split("File size exceeds ")[1],
       );
+    } else if (
+      typeof status.error === "string" &&
+      status.error.includes("failed to finish without timing out")
+    ) {
+      logger.warn("CDP timed out while loading the page", { status, jobId });
+      throw new FEPageLoadFailed();
     } else if (
       typeof status.error === "string" &&
       // TODO: improve this later
